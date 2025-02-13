@@ -34,7 +34,7 @@ data_list = list(year_2000, year_2001, year_2002, year_2003,
                  year_2016, year_2017, year_2018, year_2019,
                  year_2020, year_2021)
 
-homes_Data = data.frame(additional_info$Home) |>
+
 
 
 
@@ -46,6 +46,12 @@ colSums(is.na(full_data))
 full_data$Date <- as.Date(full_data$Date, format="%d/%m/%Y") 
 full_data = full_data |> select(-c('B365H', "B365D", "B365A",
                 "BSH", 'BSD', "BSA", 'BWH', "BWD", 'BWA'))
+
+full_data$Attendance[is.na(full_data$Attendance)] =
+  median(full_data$Attendance, na.rm = TRUE)
+
+full_data = full_data |> select(where(~all(!is.na(.))))
+
 
 
 #EDA
@@ -61,22 +67,95 @@ full_data |>
 
 
 #Feature engineering
+library(zoo)
 full_data = full_data|> mutate(Goal_Diff = FTHG - FTAG)
-
-check_Home = function(x,y){
-  if(y == 'H'){
-    return(1)
-  } else{
-    return(0)
-  }
-}
-
 
 full_data = full_data |> mutate(isHome = ifelse(FTR == 'H', 1, 0))
 
-full_data = full_data |> group_by(HomeTeam) |>
-  arrange(Date) |> mutate(AvgGoalsLast5 = zoo::rollmean(FTHG,
-                        k=5, fill= NA, align = "right"))
-   
+full_data <- full_data |> 
+  group_by(HomeTeam) |> 
+  mutate(
+    AvgGoalsLast5 = zoo::rollmean(FTHG, k = 5, fill = NA, align = "right"),
+    AvgGoalsLast5 = ifelse(is.na(AvgGoalsLast5), cummean(FTHG), AvgGoalsLast5)
+  )
+
+
+full_data = full_data |>arrange(Date) |>
+  mutate(Win_streak = 
+           cumsum(lag(FTR, default = "L") == 'H' & FTR == 'H'))
+
+full_data <- full_data |>
+  arrange(Date) |>
+  group_by(HomeTeam) |>
+  mutate(
+    HomePoints = lag(cumsum(case_when(
+      FTR == "H" ~ 3,  
+      FTR == "D" ~ 1,  
+      FTR == "A" ~ 0,  
+      TRUE ~ 0
+    )), default = 0)  # Shift cumulative sum so it only considers past games
+  ) |>
+  ungroup() |>
+  group_by(AwayTeam) |>
+  mutate(
+    AwayPoints = lag(cumsum(case_when(
+      FTR == "H" ~ 0,  
+      FTR == "D" ~ 1,  
+      FTR == "A" ~ 3,  
+      TRUE ~ 0
+    )), default = 0)
+  ) |>
+  ungroup()
+
+
+
+
+
+#----Build the predictive model
+library(caret)
+
+# Convert categorical variables to factors
+full_data <- full_data |> 
+  mutate(
+    HomeTeam = as.factor(HomeTeam),
+    AwayTeam = as.factor(AwayTeam),
+    Referee = as.factor(Referee),
+    Div = as.factor(Div)
+  )
+full_data$FTR = as.factor(full_data$FTR)  # Convert to categorical
+
+
+# Fill NA values with median or mode
+full_data$Attendance[is.na(full_data$Attendance)] =
+  median(full_data$Attendance, na.rm = TRUE)
+
+# Normalize numeric features
+normalize = function(x) (x - min(x, na.rm = TRUE)) / (max(x, na.rm = TRUE) - min(x, na.rm = TRUE))
+num_cols = c("Goal_Diff", "Win_streak", "AvgGoalsLast5", "HomePoints", "AwayPoints")
+full_data[num_cols] = lapply(full_data[num_cols], normalize)
+
+
+set.seed(150)
+split = createDataPartition(full_data$FTR, p=0.8, list = FALSE)
+train_data = full_data[split, ]
+test_data = full_data[-split, ]
+
+library(randomForest)
+
+# Train a Random Forest model
+train_data$FTR <- factor(train_data$FTR)
+
+my_model <- randomForest(FTR ~ Win_streak + AvgGoalsLast5 + HomePoints + AwayPoints, 
+                         data = train_data, ntree = 100, importance = TRUE)
+
+# Make Predictions
+predictions <- predict(my_model, test_data)
+
+# Check Accuracy
+confusionMatrix(predictions, test_data$FTR)
+
+
+
+
 
 
